@@ -1,5 +1,5 @@
 ﻿from doctest import Example
-from flask import Flask, request, jsonify
+from flask import Flask, request
 import uuid, time
 
 app = Flask(__name__)
@@ -13,23 +13,14 @@ USERS = {"alice@example.com":{"password":"pass123", "role":"user"},
 
 TOKENS = {}
 
-
-# bearer token
-# def requirer_bearer(req):
-#     auth = req.headers.get('Authorization')
-#     if not auth.startswith('Bearer '):
-#         return None
-    
-#     return TOKENS.get(token)
-# bearer token
-def requirer_bearer(req):
+def require_bearer(req):
     auth = req.headers.get("Authorization", "")
     if not auth.startswith("Bearer "):
         return None
-    token = auth.split(' ',1)[1].strip()
+    token = auth.split(" ", 1)[1].strip()
     return TOKENS.get(token)
 
-@app.post('/login')
+@app.post("/login")
 def login():
     data = request.get_json()
     print(data)
@@ -44,41 +35,89 @@ def login():
 
     return {"token": tok,'role': user['role']}
 
+@app.post("/register")
+def register():
+    data = request.get_json(silent=True) or {}
+    email = (data.get("email") or "").strip().lower()
+    password = data.get("password") or ""
 
-@app.get('/me')
-def me():
-    principals = requirer_bearer(request)
+    if not email or "@" not in email:
+        return {"error": "bad_email"}, 400
+    if not password or len(password) < 6:
+        return {"error": "bad_password"}, 400
+    if email in USERS:
+        return {"error": "conflict"}, 409
+
+    USERS[email] = {"password": password, "role": "user"}
+    tok = str(uuid.uuid4())
+    TOKENS[tok] = {"email": email, "role": "user"}
+    return {"token": tok, "email": email, "role": "user"}, 201
+
+@app.post("/change-password")
+def change_password():
+    principals = require_bearer(request)
     if not principals:
-        return {"error": "Unauthorized"}, 401
-    return {"email": principals['email'], 'role': principals['role']}
+        return {"error": "unauthorized"}, 401
 
-@app.get('/admin')
-def admin_only():
-    user = requirer_bearer(request)
-    if not user:
-        return jsonify({"error": "unauthorized"}), 401
-    if user.get('role') != 'admin':
-        return jsonify({"error": "forbidden"}), 403
-    return jsonify({"ok": True, "secret": "flag-123"}), 200
+    data = request.get_json(silent=True) or {}
+    old_password = data.get("old_password") or ""
+    new_password = data.get("new_password") or ""
+    email = principals["email"]
 
-@app.post('/logout')
+    # Validate payload + current password
+    user = USERS.get(email)
+    if not user or not old_password or not new_password:
+        return {"error": "bad_request"}, 400
+    if user["password"] != old_password:
+        return {"error": "bad_request"}, 400
+    if len(new_password) < 6 or new_password == old_password:
+        return {"error": "bad_request"}, 400
+
+    # Update password + rotate token
+    old_tok = get_bearer_token(request)
+    if old_tok:
+        TOKENS.pop(old_tok, None)
+    USERS[email]["password"] = new_password
+    new_tok = str(uuid.uuid4())
+    TOKENS[new_tok] = {"email": email, "role": user["role"]}
+    return {"token": new_tok}, 200
+
+
+
+@app.post("/logout")
 def logout():
-    # Извлекаем токен из заголовка
-    auth = request.headers.get('Authorization', '')
-    if not auth.startswith('Bearer '):
-        return jsonify({"error": "unauthorized"}), 401
-    token = auth.split(' ')[1].strip()
+    principals = require_bearer(request)
+    if not principals:
+        return {"error": "unauthorized"}, 401
 
-    # Если такого токена нет — считаем, что он недействителен
-    if token not in TOKENS:
-        return jsonify({"error": "unauthorized"}), 401
+    auth = request.headers.get("Authorization", "")
+    token = auth.split(" ", 1)[1].strip()
+    TOKENS.pop(token, None)
 
-    # Удаляем токен, чтобы он перестал работать
-    del TOKENS[token]
-    return jsonify({"ok": True}), 200
+    return {"ok": True}
+
+@app.get("/me")
+def me():
+    principalsme = require_bearer(request)
+    if not principalsme:
+        return {"error": "unauthorized"}, 401
+    return {"email": principalsme["email"], "role": principalsme["role"]}
+
+@app.get("/admin")
+def admin():
+    principalsadmin = require_bearer(request)
+    if principalsadmin and principalsadmin.get("role") == "admin":
+        print({"OK": True, "secret": "flag-123"})
+        return {"OK": True, "secret": "flag-123"}
+    elif principalsadmin and principalsadmin.get("role") != "admin":
+        return {"error": "forbidden"}, 403
+    return  {"error": "unauthorized"}, 401
+
+def get_bearer_token(req):
+    auth = req.headers.get("Authorization", "")
+    if not auth.startswith("Bearer "):
+        return None
+    return auth.split(" ", 1)[1].strip()
 
 if __name__=="__main__":
-    app.run(host='127.0.0.1', port=5000)
-
-
-    #comment added to test git diff
+    app.run(host='127.0.0.1', port=5000, use_reloader=False)
